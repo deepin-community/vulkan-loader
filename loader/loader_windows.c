@@ -46,7 +46,7 @@
 #include <winternl.h>
 #include <strsafe.h>
 #if defined(__MINGW32__)
-#undef strcpy  // fix error with redfined strcpy when building with MinGW-w64
+#undef strcpy  // fix error with redefined strcpy when building with MinGW-w64
 #endif
 #include <dxgi1_6.h>
 #include "adapters.h"
@@ -79,7 +79,7 @@ void windows_initialization(void) {
 
     // This is needed to ensure that newer APIs are available right away
     // and not after the first call that has been statically linked
-    LoadLibrary("gdi32.dll");
+    LoadLibraryEx("gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
     wchar_t systemPath[MAX_PATH] = L"";
     GetSystemDirectoryW(systemPath, MAX_PATH);
@@ -99,7 +99,11 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved) {
     (void)hinst;
     switch (reason) {
         case DLL_PROCESS_ATTACH:
-            loader_initialize();
+            // Only initialize necessary sync primitives
+            loader_platform_thread_create_mutex(&loader_lock);
+            loader_platform_thread_create_mutex(&loader_preload_icd_lock);
+            loader_platform_thread_create_mutex(&loader_global_instance_list_lock);
+            init_global_loader_settings();
             break;
         case DLL_PROCESS_DETACH:
             if (NULL == reserved) {
@@ -141,7 +145,7 @@ bool windows_add_json_entry(const struct loader_instance *inst,
             loader_instance_heap_realloc(inst, *reg_data, *total_size, *total_size * 2, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
         if (NULL == new_ptr) {
             loader_log(inst, VULKAN_LOADER_ERROR_BIT, 0,
-                       "windows_add_json_entry: Failed to reallocate space for registry value of size %d for key %s",
+                       "windows_add_json_entry: Failed to reallocate space for registry value of size %ld for key %s",
                        *total_size * 2, json_path);
             *result = VK_ERROR_OUT_OF_HOST_MEMORY;
             return false;
@@ -179,7 +183,7 @@ bool windows_get_device_registry_entry(const struct loader_instance *inst, char 
     CONFIGRET status = CM_Open_DevNode_Key(dev_id, KEY_QUERY_VALUE, 0, RegDisposition_OpenExisting, &hkrKey, CM_REGISTRY_SOFTWARE);
     if (status != CR_SUCCESS) {
         loader_log(inst, VULKAN_LOADER_WARN_BIT | VULKAN_LOADER_DRIVER_BIT, 0,
-                   "windows_get_device_registry_entry: Failed to open registry key for DeviceID(%d)", dev_id);
+                   "windows_get_device_registry_entry: Failed to open registry key for DeviceID(%ld)", dev_id);
         *result = VK_ERROR_INCOMPATIBLE_DRIVER;
         return false;
     }
@@ -190,10 +194,10 @@ bool windows_get_device_registry_entry(const struct loader_instance *inst, char 
     if (ret != ERROR_SUCCESS) {
         if (ret == ERROR_FILE_NOT_FOUND) {
             loader_log(inst, VULKAN_LOADER_INFO_BIT | VULKAN_LOADER_DRIVER_BIT, 0,
-                       "windows_get_device_registry_entry: Device ID(%d) Does not contain a value for \"%s\"", dev_id, value_name);
+                       "windows_get_device_registry_entry: Device ID(%ld) Does not contain a value for \"%s\"", dev_id, value_name);
         } else {
             loader_log(inst, VULKAN_LOADER_INFO_BIT | VULKAN_LOADER_DRIVER_BIT, 0,
-                       "windows_get_device_registry_entry: DeviceID(%d) Failed to obtain %s size", dev_id, value_name);
+                       "windows_get_device_registry_entry: DeviceID(%ld) Failed to obtain %s size", dev_id, value_name);
         }
         goto out;
     }
@@ -210,7 +214,7 @@ bool windows_get_device_registry_entry(const struct loader_instance *inst, char 
 
     if (ret != ERROR_SUCCESS) {
         loader_log(inst, VULKAN_LOADER_ERROR_BIT | VULKAN_LOADER_DRIVER_BIT, 0,
-                   "windows_get_device_registry_entry: DeviceID(%d) Failed to obtain %s", value_name);
+                   "windows_get_device_registry_entry: DeviceID(%ld) Failed to obtain %s", dev_id, value_name);
         *result = VK_ERROR_INCOMPATIBLE_DRIVER;
         goto out;
     }
@@ -304,7 +308,7 @@ VkResult windows_get_device_registry_files(const struct loader_instance *inst, u
             status = CM_Get_Child(&childID, devID, 0);
             if (status != CR_SUCCESS) {
                 loader_log(inst, VULKAN_LOADER_INFO_BIT | log_target_flag, 0,
-                           "windows_get_device_registry_files: unable to open child-device error:%d", status);
+                           "windows_get_device_registry_files: unable to open child-device error:%ld", status);
                 continue;
             }
 
@@ -313,12 +317,12 @@ VkResult windows_get_device_registry_files(const struct loader_instance *inst, u
                 CM_Get_Device_IDW(childID, buffer, MAX_DEVICE_ID_LEN, 0);
 
                 loader_log(inst, VULKAN_LOADER_INFO_BIT | log_target_flag, 0,
-                           "windows_get_device_registry_files: Opening child device %d - %ls", childID, buffer);
+                           "windows_get_device_registry_files: Opening child device %ld - %ls", childID, buffer);
 
                 status = CM_Get_DevNode_Registry_PropertyW(childID, CM_DRP_CLASSGUID, NULL, &childGuid, &childGuidSize, 0);
                 if (status != CR_SUCCESS) {
                     loader_log(inst, VULKAN_LOADER_ERROR_BIT | log_target_flag, 0,
-                               "windows_get_device_registry_files: unable to obtain GUID for:%d error:%d", childID, status);
+                               "windows_get_device_registry_files: unable to obtain GUID for:%ld error:%ld", childID, status);
 
                     result = VK_ERROR_INCOMPATIBLE_DRIVER;
                     continue;
@@ -326,7 +330,7 @@ VkResult windows_get_device_registry_files(const struct loader_instance *inst, u
 
                 if (wcscmp(childGuid, softwareComponentGUID) != 0) {
                     loader_log(inst, VULKAN_LOADER_DEBUG_BIT | log_target_flag, 0,
-                               "windows_get_device_registry_files: GUID for %d is not SoftwareComponent skipping", childID);
+                               "windows_get_device_registry_files: GUID for %ld is not SoftwareComponent skipping", childID);
                     continue;
                 }
 
@@ -447,7 +451,7 @@ VkResult windows_get_registry_files(const struct loader_instance *inst, char *lo
                         if (NULL == new_ptr) {
                             loader_log(
                                 inst, VULKAN_LOADER_ERROR_BIT | log_target_flag, 0,
-                                "windows_get_registry_files: Failed to reallocate space for registry value of size %d for key %s",
+                                "windows_get_registry_files: Failed to reallocate space for registry value of size %ld for key %s",
                                 *reg_data_size * 2, name);
                             RegCloseKey(key);
                             result = VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -688,7 +692,7 @@ VkResult windows_read_manifest_from_d3d_adapters(const struct loader_instance *i
                 goto out;
             }
 
-            // If this is a string and not a multi-string, we don't want to go throught the loop more than once
+            // If this is a string and not a multi-string, we don't want to go through the loop more than once
             if (full_info->value_type == REG_SZ) {
                 break;
             }
@@ -793,12 +797,143 @@ out:
     return vk_result;
 }
 
-// This function allocates an array in sorted_devices which must be freed by the caller if not null
-VkResult windows_read_sorted_physical_devices(struct loader_instance *inst, uint32_t *sorted_devices_count,
-                                              struct loader_phys_dev_per_icd **sorted_devices) {
+VkResult enumerate_adapter_physical_devices(struct loader_instance *inst, struct loader_icd_term *icd_term, LUID luid,
+                                            uint32_t *icd_phys_devs_array_count,
+                                            struct loader_icd_physical_devices *icd_phys_devs_array) {
+    uint32_t count = 0;
+    VkResult res = icd_term->scanned_icd->EnumerateAdapterPhysicalDevices(icd_term->instance, luid, &count, NULL);
+    if (res == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        return res;
+    } else if (res == VK_ERROR_INCOMPATIBLE_DRIVER || res == VK_ERROR_INITIALIZATION_FAILED || 0 == count) {
+        return VK_SUCCESS;  // This driver doesn't support the adapter
+    } else if (res != VK_SUCCESS) {
+        loader_log(inst, VULKAN_LOADER_WARN_BIT, 0,
+                   "Failed to convert DXGI adapter into Vulkan physical device with unexpected error code: %d", res);
+        return VK_SUCCESS;
+    }
+
+    // Take a pointer to the last element of icd_phys_devs_array to simplify usage
+    struct loader_icd_physical_devices *next_icd_phys_devs = &icd_phys_devs_array[*icd_phys_devs_array_count];
+
+    // Get the actual physical devices
+    do {
+        next_icd_phys_devs->physical_devices = loader_instance_heap_realloc(
+            inst, next_icd_phys_devs->physical_devices, next_icd_phys_devs->device_count * sizeof(VkPhysicalDevice),
+            count * sizeof(VkPhysicalDevice), VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
+        if (next_icd_phys_devs->physical_devices == NULL) {
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        next_icd_phys_devs->device_count = count;
+    } while ((res = icd_term->scanned_icd->EnumerateAdapterPhysicalDevices(icd_term->instance, luid, &count,
+                                                                           next_icd_phys_devs->physical_devices)) == VK_INCOMPLETE);
+
+    if (res != VK_SUCCESS) {
+        loader_instance_heap_free(inst, next_icd_phys_devs->physical_devices);
+        next_icd_phys_devs->physical_devices = NULL;
+        // Unless OOHM occurs, only return VK_SUCCESS
+        if (res != VK_ERROR_OUT_OF_HOST_MEMORY) {
+            res = VK_SUCCESS;
+            loader_log(inst, VULKAN_LOADER_WARN_BIT, 0, "Failed to convert DXGI adapter into Vulkan physical device");
+        }
+        return res;
+    }
+
+    // Because the loader calls EnumerateAdapterPhysicalDevices on all drivers with each DXGI Adapter, if there are multiple drivers
+    // that share a luid the physical device will get queried multiple times. We can prevent that by not adding them if the
+    // enumerated physical devices have already been added.
+    bool already_enumerated = false;
+    for (uint32_t j = 0; j < *icd_phys_devs_array_count; j++) {
+        if (count == icd_phys_devs_array[j].device_count) {
+            bool matches = true;
+            for (uint32_t k = 0; k < icd_phys_devs_array[j].device_count; k++) {
+                if (icd_phys_devs_array[j].physical_devices[k] != next_icd_phys_devs->physical_devices[k]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                already_enumerated = true;
+            }
+        }
+    }
+    if (!already_enumerated) {
+        next_icd_phys_devs->device_count = count;
+        next_icd_phys_devs->icd_term = icd_term;
+        next_icd_phys_devs->windows_adapter_luid = luid;
+        (*icd_phys_devs_array_count)++;
+    } else {
+        // Avoid memory leak in case of the already_enumerated hitting true
+        // at the last enumerate_adapter_physical_devices call in the outer loop
+        loader_instance_heap_free(inst, next_icd_phys_devs->physical_devices);
+        next_icd_phys_devs->physical_devices = NULL;
+    }
+
+    return VK_SUCCESS;
+}
+
+// Whenever there are multiple drivers for the same hardware and one of the drivers is an implementation layered on top of another
+// API (such as the Dozen driver which converts vulkan to Dx12), we want to make sure the layered driver appears after the 'native'
+// driver. This function iterates over all physical devices and make sure any with matching LUID's are sorted such that drivers with
+// a underlyingAPI of VK_LAYERED_DRIVER_UNDERLYING_API_D3D12_MSFT are ordered after drivers without it.
+void sort_physical_devices_with_same_luid(struct loader_instance *inst, uint32_t icd_phys_devs_array_count,
+                                          struct loader_icd_physical_devices *icd_phys_devs_array) {
+    bool app_is_vulkan_1_1 = loader_check_version_meets_required(LOADER_VERSION_1_1_0, inst->app_api_version);
+
+    for (uint32_t i = 0; icd_phys_devs_array_count > 1 && i < icd_phys_devs_array_count - 1; i++) {
+        for (uint32_t j = i + 1; j < icd_phys_devs_array_count; j++) {
+            // Only want to reorder physical devices if their ICD's LUID's match
+            if ((icd_phys_devs_array[i].windows_adapter_luid.HighPart != icd_phys_devs_array[j].windows_adapter_luid.HighPart) ||
+                (icd_phys_devs_array[i].windows_adapter_luid.LowPart != icd_phys_devs_array[j].windows_adapter_luid.LowPart)) {
+                continue;
+            }
+
+            VkLayeredDriverUnderlyingApiMSFT underlyingAPI = VK_LAYERED_DRIVER_UNDERLYING_API_NONE_MSFT;
+            VkPhysicalDeviceLayeredDriverPropertiesMSFT layered_driver_properties_msft = {0};
+            layered_driver_properties_msft.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_DRIVER_PROPERTIES_MSFT;
+            VkPhysicalDeviceProperties2 props2 = {0};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = (void *)&layered_driver_properties_msft;
+
+            // Because there may be multiple physical devices associated with each ICD, we need to check each physical device
+            // whether it is layered
+            for (uint32_t k = 0; k < icd_phys_devs_array[i].device_count; k++) {
+                VkPhysicalDeviceProperties dev_props = {0};
+                icd_phys_devs_array[i].icd_term->dispatch.GetPhysicalDeviceProperties(icd_phys_devs_array[i].physical_devices[k],
+                                                                                      &dev_props);
+
+                bool device_is_1_1_capable =
+                    loader_check_version_meets_required(LOADER_VERSION_1_1_0, loader_make_version(dev_props.apiVersion));
+
+                PFN_vkGetPhysicalDeviceProperties2 GetPhysDevProps2 = NULL;
+                if (app_is_vulkan_1_1 && device_is_1_1_capable) {
+                    GetPhysDevProps2 = icd_phys_devs_array[i].icd_term->dispatch.GetPhysicalDeviceProperties2;
+                } else {
+                    GetPhysDevProps2 = (PFN_vkGetPhysicalDeviceProperties2)icd_phys_devs_array[i]
+                                           .icd_term->dispatch.GetPhysicalDeviceProperties2KHR;
+                }
+                if (GetPhysDevProps2) {
+                    GetPhysDevProps2(icd_phys_devs_array[i].physical_devices[k], &props2);
+                    if (layered_driver_properties_msft.underlyingAPI != VK_LAYERED_DRIVER_UNDERLYING_API_NONE_MSFT) {
+                        underlyingAPI = layered_driver_properties_msft.underlyingAPI;
+                        break;
+                    }
+                }
+            }
+            if (underlyingAPI == VK_LAYERED_DRIVER_UNDERLYING_API_D3D12_MSFT) {
+                struct loader_icd_physical_devices swap_icd = icd_phys_devs_array[i];
+                icd_phys_devs_array[i] = icd_phys_devs_array[j];
+                icd_phys_devs_array[j] = swap_icd;
+            }
+        }
+    }
+}
+
+// This function allocates icd_phys_devs_array which must be freed by the caller if not null
+VkResult windows_read_sorted_physical_devices(struct loader_instance *inst, uint32_t *icd_phys_devs_array_count,
+                                              struct loader_icd_physical_devices **icd_phys_devs_array) {
     VkResult res = VK_SUCCESS;
 
-    uint32_t sorted_alloc = 0;
+    uint32_t icd_phys_devs_array_size = 0;
     struct loader_icd_term *icd_term = NULL;
     IDXGIFactory6 *dxgi_factory = NULL;
     HRESULT hres = fpCreateDXGIFactory1(&IID_IDXGIFactory6, (void **)&dxgi_factory);
@@ -806,10 +941,10 @@ VkResult windows_read_sorted_physical_devices(struct loader_instance *inst, uint
         loader_log(inst, VULKAN_LOADER_INFO_BIT, 0, "Failed to create DXGI factory 6. Physical devices will not be sorted");
         goto out;
     }
-    sorted_alloc = 16;
-    *sorted_devices = loader_instance_heap_calloc(inst, sorted_alloc * sizeof(struct loader_phys_dev_per_icd),
-                                                  VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-    if (*sorted_devices == NULL) {
+    icd_phys_devs_array_size = 16;
+    *icd_phys_devs_array = loader_instance_heap_calloc(inst, icd_phys_devs_array_size * sizeof(struct loader_icd_physical_devices),
+                                                       VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
+    if (*icd_phys_devs_array == NULL) {
         res = VK_ERROR_OUT_OF_HOST_MEMORY;
         goto out;
     }
@@ -833,74 +968,35 @@ VkResult windows_read_sorted_physical_devices(struct loader_instance *inst, uint
             continue;
         }
 
-        if (sorted_alloc <= i) {
-            uint32_t old_size = sorted_alloc * sizeof(struct loader_phys_dev_per_icd);
-            *sorted_devices =
-                loader_instance_heap_realloc(inst, *sorted_devices, old_size, 2 * old_size, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-            if (*sorted_devices == NULL) {
-                adapter->lpVtbl->Release(adapter);
-                res = VK_ERROR_OUT_OF_HOST_MEMORY;
-                goto out;
-            }
-            sorted_alloc *= 2;
-        }
-        struct loader_phys_dev_per_icd *sorted_array = *sorted_devices;
-        sorted_array[*sorted_devices_count].device_count = 0;
-        sorted_array[*sorted_devices_count].physical_devices = NULL;
-
         icd_term = inst->icd_terms;
-        for (uint32_t icd_idx = 0; NULL != icd_term; icd_term = icd_term->next, icd_idx++) {
+        while (NULL != icd_term) {
             // This is the new behavior, which cannot be run unless the ICD provides EnumerateAdapterPhysicalDevices
             if (icd_term->scanned_icd->EnumerateAdapterPhysicalDevices == NULL) {
+                icd_term = icd_term->next;
                 continue;
             }
 
-            uint32_t count = 0;
-            VkResult vkres =
-                icd_term->scanned_icd->EnumerateAdapterPhysicalDevices(icd_term->instance, description.AdapterLuid, &count, NULL);
-            if (vkres == VK_ERROR_INCOMPATIBLE_DRIVER) {
-                continue;  // This driver doesn't support the adapter
-            } else if (vkres == VK_ERROR_OUT_OF_HOST_MEMORY) {
-                res = VK_ERROR_OUT_OF_HOST_MEMORY;
-                goto out;
-            } else if (vkres != VK_SUCCESS) {
-                loader_log(inst, VULKAN_LOADER_WARN_BIT, 0,
-                           "Failed to convert DXGI adapter into Vulkan physical device with unexpected error code");
-                continue;
-            }
-
-            // Get the actual physical devices
-            if (0 != count) {
-                do {
-                    sorted_array[*sorted_devices_count].physical_devices =
-                        loader_instance_heap_realloc(inst, sorted_array[*sorted_devices_count].physical_devices,
-                                                     sorted_array[*sorted_devices_count].device_count * sizeof(VkPhysicalDevice),
-                                                     count * sizeof(VkPhysicalDevice), VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-                    if (sorted_array[*sorted_devices_count].physical_devices == NULL) {
-                        res = VK_ERROR_OUT_OF_HOST_MEMORY;
-                        break;
-                    }
-                    sorted_array[*sorted_devices_count].device_count = count;
-                } while ((vkres = icd_term->scanned_icd->EnumerateAdapterPhysicalDevices(
-                              icd_term->instance, description.AdapterLuid, &count,
-                              sorted_array[*sorted_devices_count].physical_devices)) == VK_INCOMPLETE);
-            }
-
-            if (vkres != VK_SUCCESS) {
-                loader_instance_heap_free(inst, sorted_array[*sorted_devices_count].physical_devices);
-                sorted_array[*sorted_devices_count].physical_devices = NULL;
-                if (vkres == VK_ERROR_OUT_OF_HOST_MEMORY) {
+            if (icd_phys_devs_array_size <= *icd_phys_devs_array_count) {
+                uint32_t old_size = icd_phys_devs_array_size * sizeof(struct loader_icd_physical_devices);
+                *icd_phys_devs_array = loader_instance_heap_realloc(inst, *icd_phys_devs_array, old_size, 2 * old_size,
+                                                                    VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
+                if (*icd_phys_devs_array == NULL) {
+                    adapter->lpVtbl->Release(adapter);
                     res = VK_ERROR_OUT_OF_HOST_MEMORY;
                     goto out;
-                } else {
-                    loader_log(inst, VULKAN_LOADER_WARN_BIT, 0, "Failed to convert DXGI adapter into Vulkan physical device");
-                    continue;
                 }
+                icd_phys_devs_array_size *= 2;
             }
-            sorted_array[*sorted_devices_count].device_count = count;
-            sorted_array[*sorted_devices_count].icd_index = icd_idx;
-            sorted_array[*sorted_devices_count].icd_term = icd_term;
-            (*sorted_devices_count)++;
+            (*icd_phys_devs_array)[*icd_phys_devs_array_count].device_count = 0;
+            (*icd_phys_devs_array)[*icd_phys_devs_array_count].physical_devices = NULL;
+
+            res = enumerate_adapter_physical_devices(inst, icd_term, description.AdapterLuid, icd_phys_devs_array_count,
+                                                     *icd_phys_devs_array);
+            if (res == VK_ERROR_OUT_OF_HOST_MEMORY) {
+                adapter->lpVtbl->Release(adapter);
+                goto out;
+            }
+            icd_term = icd_term->next;
         }
 
         adapter->lpVtbl->Release(adapter);
@@ -908,13 +1004,13 @@ VkResult windows_read_sorted_physical_devices(struct loader_instance *inst, uint
 
     dxgi_factory->lpVtbl->Release(dxgi_factory);
 
+    sort_physical_devices_with_same_luid(inst, *icd_phys_devs_array_count, *icd_phys_devs_array);
+
 out:
-    if (*sorted_devices_count == 0 && *sorted_devices != NULL) {
-        loader_instance_heap_free(inst, *sorted_devices);
-        *sorted_devices = NULL;
+    if (*icd_phys_devs_array_count == 0 && *icd_phys_devs_array != NULL) {
+        loader_instance_heap_free(inst, *icd_phys_devs_array);
+        *icd_phys_devs_array = NULL;
     }
-    *sorted_devices_count = *sorted_devices_count;
-    *sorted_devices = *sorted_devices;
     return res;
 }
 
@@ -933,7 +1029,7 @@ VkLoaderFeatureFlags windows_initialize_dxgi(void) {
 // Multiple groups could have devices out of the same sorted list, however, a single group's devices must all come
 // from the same sorted list.
 void windows_sort_devices_in_group(struct loader_instance *inst, struct VkPhysicalDeviceGroupProperties *group_props,
-                                   struct loader_phys_dev_per_icd *icd_sorted_list) {
+                                   struct loader_icd_physical_devices *icd_sorted_list) {
     uint32_t cur_index = 0;
     for (uint32_t dev = 0; dev < icd_sorted_list->device_count; ++dev) {
         for (uint32_t grp_dev = cur_index; grp_dev < group_props->physicalDeviceCount; ++grp_dev) {
@@ -958,7 +1054,7 @@ void windows_sort_devices_in_group(struct loader_instance *inst, struct VkPhysic
 VkResult windows_sort_physical_device_groups(struct loader_instance *inst, const uint32_t group_count,
                                              struct loader_physical_device_group_term *sorted_group_term,
                                              const uint32_t sorted_device_count,
-                                             struct loader_phys_dev_per_icd *sorted_phys_dev_array) {
+                                             struct loader_icd_physical_devices *sorted_phys_dev_array) {
     if (0 == group_count || NULL == sorted_group_term) {
         loader_log(inst, VULKAN_LOADER_WARN_BIT, 0,
                    "windows_sort_physical_device_groups: Called with invalid information (Group count %d, Sorted Info %p)",
@@ -1015,10 +1111,8 @@ char *windows_get_app_package_manifest_path(const struct loader_instance *inst) 
     }
 
     UINT32 numPackages = 0, bufferLength = 0;
-    /* This literal string identifies the Microsoft-published OpenCL and OpenGL Compatibility Pack
-     * (so named at the time this is being added), which contains OpenGLOn12 and OpenCLOn12 mapping
-     * layers, and will contain VulkanOn12 (aka Dozen) going forward.
-     */
+    // This literal string identifies the Microsoft-published OpenCL, OpenGL, and Vulkan Compatibility Pack, which contains
+    // OpenGLOn12, OpenCLOn12, and VulkanOn12 (aka Dozen) mappinglayers
     PCWSTR familyName = L"Microsoft.D3DMappingLayers_8wekyb3d8bbwe";
     if (ERROR_INSUFFICIENT_BUFFER != fpGetPackagesByPackageFamily(familyName, &numPackages, NULL, &bufferLength, NULL) ||
         numPackages == 0 || bufferLength == 0) {
@@ -1100,12 +1194,15 @@ VkResult get_settings_path_if_exists_in_registry_key(const struct loader_instanc
             }
         }
 
-        // Make sure the path exists first
-        if (*out_path && !loader_platform_file_exists(name)) {
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
-
         if (strcmp(VK_LOADER_SETTINGS_FILENAME, &(name[start_of_path_filename])) == 0) {
+            // Make sure the path exists first
+            if (!loader_platform_file_exists(name)) {
+                loader_log(
+                    inst, VULKAN_LOADER_DEBUG_BIT, 0,
+                    "Registry contained entry to vk_loader_settings.json but the corresponding file does not exist, ignoring");
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+
             *out_path = loader_instance_heap_calloc(inst, name_size + 1, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
             if (*out_path == NULL) {
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -1123,41 +1220,37 @@ VkResult get_settings_path_if_exists_in_registry_key(const struct loader_instanc
 VkResult windows_get_loader_settings_file_path(const struct loader_instance *inst, char **out_path) {
     VkResult result = VK_SUCCESS;
     DWORD access_flags = KEY_QUERY_VALUE;
+    LONG rtn_value = 0;
     HKEY key = NULL;
-
     *out_path = NULL;
 
-    // if we are running with admin privileges, only check HKEY_LOCAL_MACHINE.
-    // Otherwise check HKEY_CURRENT_USER, and if nothing is there, look in HKEY_LOCAL_MACHINE
+    // Search in HKEY_CURRENT_USER first if we are running without admin privileges
+    // Exit if a settings file was found.
+    // Otherwise check in HKEY_LOCAL_MACHINE.
 
-    if (is_high_integrity()) {
-        LONG rtn_value = RegOpenKeyEx(HKEY_LOCAL_MACHINE, VK_SETTINGS_INFO_REGISTRY_LOC, 0, access_flags, &key);
-        if (ERROR_SUCCESS != rtn_value) {
-            result = VK_ERROR_FEATURE_NOT_PRESENT;
-            goto out;
-        }
-        result = get_settings_path_if_exists_in_registry_key(inst, out_path, key);
-    } else {
-        LONG rtn_value = RegOpenKeyEx(HKEY_CURRENT_USER, VK_SETTINGS_INFO_REGISTRY_LOC, 0, access_flags, &key);
+    if (!is_high_integrity()) {
+        rtn_value = RegOpenKeyEx(HKEY_CURRENT_USER, VK_SETTINGS_INFO_REGISTRY_LOC, 0, access_flags, &key);
         if (ERROR_SUCCESS == rtn_value) {
             result = get_settings_path_if_exists_in_registry_key(inst, out_path, key);
-            RegCloseKey(key);
+
             // Either we got OOM and *must* exit or we successfully found the settings file and can exit
             if (result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_SUCCESS) {
                 goto out;
             }
+            RegCloseKey(key);
+            key = NULL;
         }
+    }
 
-        rtn_value = RegOpenKeyEx(HKEY_LOCAL_MACHINE, VK_SETTINGS_INFO_REGISTRY_LOC, 0, access_flags, &key);
-        if (ERROR_SUCCESS != rtn_value) {
-            result = VK_ERROR_FEATURE_NOT_PRESENT;
-            goto out;
-        }
+    rtn_value = RegOpenKeyEx(HKEY_LOCAL_MACHINE, VK_SETTINGS_INFO_REGISTRY_LOC, 0, access_flags, &key);
+    if (ERROR_SUCCESS != rtn_value) {
+        result = VK_ERROR_FEATURE_NOT_PRESENT;
+        goto out;
+    }
 
-        result = get_settings_path_if_exists_in_registry_key(inst, out_path, key);
-        if (result == VK_ERROR_OUT_OF_HOST_MEMORY) {
-            goto out;
-        }
+    result = get_settings_path_if_exists_in_registry_key(inst, out_path, key);
+    if (result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        goto out;
     }
 
 out:

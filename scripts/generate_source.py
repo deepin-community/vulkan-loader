@@ -3,6 +3,8 @@
 # Copyright (c) 2019 Valve Corporation
 # Copyright (c) 2019 LunarG, Inc.
 # Copyright (c) 2019 Google Inc.
+# Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2023 RasterGrid Kft.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,20 +31,28 @@ import tempfile
 import datetime
 import re
 
-# files to exclude from --verify check
-verify_exclude = ['.clang-format']
-
 def main(argv):
     parser = argparse.ArgumentParser(description='Generate source code for this repository')
     parser.add_argument('registry', metavar='REGISTRY_PATH', help='path to the Vulkan-Headers registry directory')
+    parser.add_argument('--api',
+                        default='vulkan',
+                        choices=['vulkan'],
+                        help='Specify API name to generate')
     parser.add_argument('--generated-version', help='sets the header version used to generate the repo')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('-i', '--incremental', action='store_true', help='only update repo files that change')
     group.add_argument('-v', '--verify', action='store_true', help='verify repo files match generator output')
     args = parser.parse_args(argv)
 
+    registry = os.path.abspath(os.path.join(args.registry,  'vk.xml'))
+    if not os.path.isfile(registry):
+        registry = os.path.abspath(os.path.join(args.registry, 'Vulkan-Headers/registry/vk.xml'))
+        if not os.path.isfile(registry):
+            print(f'cannot find vk.xml in {args.registry}')
+            return -1
+
     gen_cmds = [[common_codegen.repo_relative('scripts/loader_genvk.py'),
-                 '-registry', os.path.abspath(os.path.join(args.registry,  'vk.xml')),
+                 '-registry', registry,
                  '-quiet',
                  filename] for filename in ['vk_layer_dispatch_table.h',
                                             'vk_loader_extensions.h',
@@ -79,7 +89,7 @@ def main(argv):
         temp_files = set(os.listdir(temp_dir))
         repo_files = set(os.listdir(repo_dir))
         files_match = True
-        for filename in sorted((temp_files | repo_files) - set(verify_exclude)):
+        for filename in sorted((temp_files | repo_files)):
             if filename not in repo_files:
                 print('ERROR: Missing repo file', filename)
                 files_match = False
@@ -108,13 +118,13 @@ def main(argv):
                 print('update', repo_filename)
                 shutil.copyfile(temp_filename, repo_filename)
 
-    # write out the header version used to generate the code to a checked in CMake FIle
+    # write out the header version used to generate the code to a checked in CMake file
     if args.generated_version:
         # Update the CMake project version
         with open(common_codegen.repo_relative('CMakeLists.txt'), "r+") as f:
             data = f.read()
             f.seek(0)
-            f.write(re.sub("project.*VERSION.*", f"project(VULKAN_LOADER VERSION {args.generated_version})", data))
+            f.write(re.sub("project.*VERSION.*", f"project(VULKAN_LOADER VERSION {args.generated_version} LANGUAGES C)", data))
             f.truncate()
 
         with open(common_codegen.repo_relative('loader/loader.rc.in'), "r") as rc_file:

@@ -4,6 +4,8 @@
  * Copyright (c) 2014-2021 Valve Corporation
  * Copyright (c) 2014-2021 LunarG, Inc.
  * Copyright (C) 2015 Google Inc.
+ * Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2023-2023 RasterGrid Kft.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,10 +31,10 @@
 // Terminators which have simple logic belong here, since they are mostly "pass through"
 // Function declarations are in vk_loader_extensions.h, thus not needed here
 
-#include "allocation.h"
 #include "loader_common.h"
 #include "loader.h"
 #include "log.h"
+#include "stack_allocation.h"
 
 // Terminators for 1.0 functions
 
@@ -154,9 +156,11 @@ VKAPI_ATTR void VKAPI_CALL terminator_GetPhysicalDeviceFeatures2(VkPhysicalDevic
         // Write to the VkPhysicalDeviceFeatures2 struct
         icd_term->dispatch.GetPhysicalDeviceFeatures(phys_dev_term->phys_dev, &pFeatures->features);
 
-        const VkBaseInStructure *pNext = pFeatures->pNext;
+        void *pNext = pFeatures->pNext;
         while (pNext != NULL) {
-            switch (pNext->sType) {
+            VkBaseOutStructure pNext_in_structure = {0};
+            memcpy(&pNext_in_structure, pNext, sizeof(VkBaseOutStructure));
+            switch (pNext_in_structure.sType) {
                 case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
                     // Skip the check if VK_KHR_multiview is enabled because it's a device extension
                     // Write to the VkPhysicalDeviceMultiviewFeaturesKHR struct
@@ -173,7 +177,7 @@ VKAPI_ATTR void VKAPI_CALL terminator_GetPhysicalDeviceFeatures2(VkPhysicalDevic
                                "vkGetPhysicalDeviceFeatures2: Emulation found unrecognized structure type in pFeatures->pNext - "
                                "this struct will be ignored");
 
-                    pNext = pNext->pNext;
+                    pNext = pNext_in_structure.pNext;
                     break;
                 }
             }
@@ -210,9 +214,11 @@ VKAPI_ATTR void VKAPI_CALL terminator_GetPhysicalDeviceProperties2(VkPhysicalDev
         // Write to the VkPhysicalDeviceProperties2 struct
         icd_term->dispatch.GetPhysicalDeviceProperties(phys_dev_term->phys_dev, &pProperties->properties);
 
-        const VkBaseInStructure *pNext = pProperties->pNext;
+        void *pNext = pProperties->pNext;
         while (pNext != NULL) {
-            switch (pNext->sType) {
+            VkBaseOutStructure pNext_in_structure = {0};
+            memcpy(&pNext_in_structure, pNext, sizeof(VkBaseOutStructure));
+            switch (pNext_in_structure.sType) {
                 case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
                     VkPhysicalDeviceIDPropertiesKHR *id_properties = (VkPhysicalDeviceIDPropertiesKHR *)pNext;
 
@@ -236,7 +242,7 @@ VKAPI_ATTR void VKAPI_CALL terminator_GetPhysicalDeviceProperties2(VkPhysicalDev
                                "vkGetPhysicalDeviceProperties2KHR: Emulation found unrecognized structure type in "
                                "pProperties->pNext - this struct will be ignored");
 
-                    pNext = pNext->pNext;
+                    pNext = pNext_in_structure.pNext;
                     break;
                 }
             }
@@ -282,8 +288,8 @@ VKAPI_ATTR void VKAPI_CALL terminator_GetPhysicalDeviceFormatProperties2(VkPhysi
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL terminator_GetPhysicalDeviceImageFormatProperties2(
-    VkPhysicalDevice physicalDevice, const VkPhysicalDeviceImageFormatInfo2KHR *pImageFormatInfo,
-    VkImageFormatProperties2KHR *pImageFormatProperties) {
+    VkPhysicalDevice physicalDevice, const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
+    VkImageFormatProperties2 *pImageFormatProperties) {
     struct loader_physical_device_term *phys_dev_term = (struct loader_physical_device_term *)physicalDevice;
     struct loader_icd_term *icd_term = phys_dev_term->this_icd_term;
     const struct loader_instance *inst = icd_term->this_instance;
@@ -323,7 +329,7 @@ VKAPI_ATTR VkResult VKAPI_CALL terminator_GetPhysicalDeviceImageFormatProperties
 
 VKAPI_ATTR void VKAPI_CALL terminator_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
                                                                               uint32_t *pQueueFamilyPropertyCount,
-                                                                              VkQueueFamilyProperties2KHR *pQueueFamilyProperties) {
+                                                                              VkQueueFamilyProperties2 *pQueueFamilyProperties) {
     struct loader_physical_device_term *phys_dev_term = (struct loader_physical_device_term *)physicalDevice;
     struct loader_icd_term *icd_term = phys_dev_term->this_icd_term;
     const struct loader_instance *inst = icd_term->this_instance;
