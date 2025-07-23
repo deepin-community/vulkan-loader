@@ -3,6 +3,8 @@
  * Copyright (c) 2015-2022 The Khronos Group Inc.
  * Copyright (c) 2015-2022 Valve Corporation
  * Copyright (c) 2015-2022 LunarG, Inc.
+ * Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2023-2023 RasterGrid Kft.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -69,11 +71,15 @@
 #include <io.h>
 #include <shlwapi.h>
 #include <direct.h>
-#endif  // defined(_WIN32)
 
 #include "stack_allocation.h"
+#endif  // defined(_WIN32)
 
-#if defined(BUILD_STATIC_LOADER)
+#if defined(APPLE_STATIC_LOADER) && !defined(__APPLE__)
+#error "APPLE_STATIC_LOADER can only be defined on Apple platforms!"
+#endif
+
+#if defined(APPLE_STATIC_LOADER)
 #define LOADER_EXPORT
 #elif defined(__GNUC__) && __GNUC__ >= 4
 #define LOADER_EXPORT __attribute__((visibility("default")))
@@ -81,6 +87,17 @@
 #define LOADER_EXPORT __attribute__((visibility("default")))
 #else
 #define LOADER_EXPORT
+#endif
+
+// For testing purposes, we want to expose some functions not normally callable on the library
+#if defined(SHOULD_EXPORT_TEST_FUNCTIONS)
+#if defined(_WIN32)
+#define TEST_FUNCTION_EXPORT __declspec(dllexport)
+#else
+#define TEST_FUNCTION_EXPORT LOADER_EXPORT
+#endif
+#else
+#define TEST_FUNCTION_EXPORT
 #endif
 
 #define MAX_STRING_SIZE 1024
@@ -94,10 +111,10 @@
 // Environment Variable information
 #define VK_ICD_FILENAMES_ENV_VAR "VK_ICD_FILENAMES"  // Deprecated in v1.3.207 loader
 #define VK_DRIVER_FILES_ENV_VAR "VK_DRIVER_FILES"
-#define VK_LAYER_PATH_ENV_VAR "VK_LAYER_PATH"
+#define VK_EXPLICIT_LAYER_PATH_ENV_VAR "VK_LAYER_PATH"
 // Support added in v1.3.207 loader
 #define VK_ADDITIONAL_DRIVER_FILES_ENV_VAR "VK_ADD_DRIVER_FILES"
-#define VK_ADDITIONAL_LAYER_PATH_ENV_VAR "VK_ADD_LAYER_PATH"
+#define VK_ADDITIONAL_EXPLICIT_LAYER_PATH_ENV_VAR "VK_ADD_LAYER_PATH"
 // Support added in v1.3.234 loader
 #define VK_LAYERS_ENABLE_ENV_VAR "VK_LOADER_LAYERS_ENABLE"
 #define VK_LAYERS_DISABLE_ENV_VAR "VK_LOADER_LAYERS_DISABLE"
@@ -109,6 +126,9 @@
 #define VK_LOADER_DISABLE_ALL_LAYERS_VAR_3 "**"
 #define VK_LOADER_DISABLE_IMPLICIT_LAYERS_VAR "~implicit~"
 #define VK_LOADER_DISABLE_EXPLICIT_LAYERS_VAR "~explicit~"
+// Support added in v1.3.295 loader
+#define VK_IMPLICIT_LAYER_PATH_ENV_VAR "VK_IMPLICIT_LAYER_PATH"
+#define VK_ADDITIONAL_IMPLICIT_LAYER_PATH_ENV_VAR "VK_ADD_IMPLICIT_LAYER_PATH"
 
 // Override layer information
 #define VK_OVERRIDE_LAYER_NAME "VK_LAYER_LUNARG_override"
@@ -145,7 +165,9 @@
 #define VK_SETTINGS_INFO_REGISTRY_LOC ""
 
 #if defined(__QNX__)
+#ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"
+#endif
 #endif
 
 // C99:
@@ -180,15 +202,13 @@ typedef pthread_cond_t loader_platform_thread_cond;
 #define VK_ELAYERS_INFO_RELATIVE_DIR ""
 #define VK_ILAYERS_INFO_RELATIVE_DIR ""
 
-#if defined(_WIN64)
-#define HKR_VK_DRIVER_NAME API_NAME "DriverName"
-#else
-#define HKR_VK_DRIVER_NAME API_NAME "DriverNameWow"
-#endif
-#define VK_DRIVERS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\" API_NAME "\\Drivers"
-#define VK_ELAYERS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\" API_NAME "\\ExplicitLayers"
-#define VK_ILAYERS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\" API_NAME "\\ImplicitLayers"
-#define VK_SETTINGS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\" API_NAME "\\LoaderSettings"
+#define VK_VARIANT_REG_STR ""
+#define VK_VARIANT_REG_STR_W L""
+
+#define VK_DRIVERS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\Vulkan" VK_VARIANT_REG_STR "\\Drivers"
+#define VK_ELAYERS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\Vulkan" VK_VARIANT_REG_STR "\\ExplicitLayers"
+#define VK_ILAYERS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\Vulkan" VK_VARIANT_REG_STR "\\ImplicitLayers"
+#define VK_SETTINGS_INFO_REGISTRY_LOC "SOFTWARE\\Khronos\\Vulkan" VK_VARIANT_REG_STR "\\LoaderSettings"
 
 #define PRINTF_SIZE_T_SPECIFIER "%Iu"
 
@@ -223,11 +243,16 @@ extern bool loader_disable_dynamic_library_unloading;
 // Returns true if the DIRECTORY_SYMBOL is contained within path
 static inline bool loader_platform_is_path(const char *path) { return strchr(path, DIRECTORY_SYMBOL) != NULL; }
 
-// The once init functionality is not used when building a DLL on Windows. This is because there is no way to clean up the
-// resources allocated by anything allocated by once init. This isn't a problem for static libraries, but it is for dynamic
-// ones. When building a DLL, we use DllMain() instead to allow properly cleaning up resources.
+// The loader has various initialization tasks which it must do before user code can run. This includes initializing synchronization
+// objects, determining the log level, writing the version of the loader to the log, and loading dll's (on windows). On linux, the
+// solution is simply running the initialization code in  __attribute__((constructor)), which MacOS uses when the loader is
+// dynamically linked. When statically linking on MacOS, the setup code instead uses pthread_once to run the logic a single time
+// regardless of which API function the application calls first. On Windows, the equivalent way to run code at dll load time is
+// DllMain which has many limitations placed upon it. Instead, the Windows code follows MacOS and does initialization in the first
+// API call made, using InitOnceExecuteOnce, except for initialization primitives which must be done in DllMain. This is because
+// there is no way to clean up the resources allocated by anything allocated by once init.
 
-#if defined(__APPLE__) && defined(BUILD_STATIC_LOADER)
+#if defined(APPLE_STATIC_LOADER)
 static inline void loader_platform_thread_once_fn(pthread_once_t *ctl, void (*func)(void)) {
     assert(func != NULL);
     assert(ctl != NULL);
@@ -236,6 +261,13 @@ static inline void loader_platform_thread_once_fn(pthread_once_t *ctl, void (*fu
 #define LOADER_PLATFORM_THREAD_ONCE_DECLARATION(var) pthread_once_t var = PTHREAD_ONCE_INIT;
 #define LOADER_PLATFORM_THREAD_ONCE_EXTERN_DEFINITION(var) extern pthread_once_t var;
 #define LOADER_PLATFORM_THREAD_ONCE(ctl, func) loader_platform_thread_once_fn(ctl, func);
+#elif defined(WIN32)
+static inline void loader_platform_thread_win32_once_fn(INIT_ONCE *ctl, PINIT_ONCE_FN func) {
+    InitOnceExecuteOnce(ctl, func, NULL, NULL);
+}
+#define LOADER_PLATFORM_THREAD_ONCE_DECLARATION(var) INIT_ONCE var = INIT_ONCE_STATIC_INIT;
+#define LOADER_PLATFORM_THREAD_ONCE_EXTERN_DEFINITION(var) extern INIT_ONCE var;
+#define LOADER_PLATFORM_THREAD_ONCE(ctl, func) loader_platform_thread_win32_once_fn(ctl, func);
 #else
 #define LOADER_PLATFORM_THREAD_ONCE_DECLARATION(var)
 #define LOADER_PLATFORM_THREAD_ONCE_EXTERN_DEFINITION(var)
@@ -275,18 +307,27 @@ static inline char *loader_platform_executable_path(char *buffer, size_t size) {
     return buffer;
 }
 #elif defined(__APPLE__)
-#if defined(__APPLE_EMBEDDED__)
+#include <TargetConditionals.h>
+// TARGET_OS_IPHONE isn't just iOS it's also iOS/tvOS/watchOS. See TargetConditionals.h documentation.
+#if TARGET_OS_IPHONE
 static inline char *loader_platform_executable_path(char *buffer, size_t size) {
     (void)size;
     buffer[0] = '\0';
     return buffer;
 }
-#else
+#endif
+#if TARGET_OS_OSX
 #include <libproc.h>
 static inline char *loader_platform_executable_path(char *buffer, size_t size) {
+    // proc_pidpath takes a uint32_t for the buffer size
+    if (size > UINT32_MAX) {
+        return NULL;
+    }
     pid_t pid = getpid();
-    int ret = proc_pidpath(pid, buffer, size);
-    if (ret <= 0) return NULL;
+    int ret = proc_pidpath(pid, buffer, (uint32_t)size);
+    if (ret <= 0) {
+        return NULL;
+    }
     buffer[ret] = '\0';
     return buffer;
 }
@@ -316,7 +357,9 @@ static inline char *loader_platform_executable_path(char *buffer, size_t size) {
 static inline char *loader_platform_executable_path(char *buffer, size_t size) { return NULL; }
 #elif defined(__QNX__)
 
+#ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"
+#endif
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -340,7 +383,7 @@ static inline char *loader_platform_executable_path(char *buffer, size_t size) {
 }
 #endif  // defined (__QNX__)
 
-// Compatability with compilers that don't support __has_feature
+// Compatibility with compilers that don't support __has_feature
 #if !defined(__has_feature)
 #define __has_feature(x) 0
 #endif
@@ -418,12 +461,12 @@ static inline char *loader_strncpy(char *dest, size_t dest_sz, const char *src, 
 static inline const char *LoaderPnpDriverRegistry() {
     BOOL is_wow;
     IsWow64Process(GetCurrentProcess(), &is_wow);
-    return is_wow ? "VulkanDriverNameWow" : "VulkanDriverName";
+    return is_wow ? "Vulkan" VK_VARIANT_REG_STR "DriverNameWow" : "Vulkan" VK_VARIANT_REG_STR "DriverName";
 }
 static inline const wchar_t *LoaderPnpDriverRegistryWide() {
     BOOL is_wow;
     IsWow64Process(GetCurrentProcess(), &is_wow);
-    return is_wow ? L"VulkanDriverNameWow" : L"VulkanDriverName";
+    return is_wow ? L"Vulkan" VK_VARIANT_REG_STR_W L"DriverNameWow" : L"Vulkan" VK_VARIANT_REG_STR_W L"DriverName";
 }
 
 // Get the key for the plug 'n play explicit layer registry
@@ -431,12 +474,12 @@ static inline const wchar_t *LoaderPnpDriverRegistryWide() {
 static inline const char *LoaderPnpELayerRegistry() {
     BOOL is_wow;
     IsWow64Process(GetCurrentProcess(), &is_wow);
-    return is_wow ? "VulkanExplicitLayersWow" : "VulkanExplicitLayers";
+    return is_wow ? "Vulkan" VK_VARIANT_REG_STR "ExplicitLayersWow" : "Vulkan" VK_VARIANT_REG_STR "ExplicitLayers";
 }
 static inline const wchar_t *LoaderPnpELayerRegistryWide() {
     BOOL is_wow;
     IsWow64Process(GetCurrentProcess(), &is_wow);
-    return is_wow ? L"VulkanExplicitLayersWow" : L"VulkanExplicitLayers";
+    return is_wow ? L"Vulkan" VK_VARIANT_REG_STR_W L"ExplicitLayersWow" : L"Vulkan" VK_VARIANT_REG_STR_W L"ExplicitLayers";
 }
 
 // Get the key for the plug 'n play implicit layer registry
@@ -444,12 +487,12 @@ static inline const wchar_t *LoaderPnpELayerRegistryWide() {
 static inline const char *LoaderPnpILayerRegistry() {
     BOOL is_wow;
     IsWow64Process(GetCurrentProcess(), &is_wow);
-    return is_wow ? "VulkanImplicitLayersWow" : "VulkanImplicitLayers";
+    return is_wow ? "Vulkan" VK_VARIANT_REG_STR "ImplicitLayersWow" : "Vulkan" VK_VARIANT_REG_STR "ImplicitLayers";
 }
 static inline const wchar_t *LoaderPnpILayerRegistryWide() {
     BOOL is_wow;
     IsWow64Process(GetCurrentProcess(), &is_wow);
-    return is_wow ? L"VulkanImplicitLayersWow" : L"VulkanImplicitLayers";
+    return is_wow ? L"Vulkan" VK_VARIANT_REG_STR_W L"ImplicitLayersWow" : L"Vulkan" VK_VARIANT_REG_STR_W L"ImplicitLayers";
 }
 
 // File IO
