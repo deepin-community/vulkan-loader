@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # ~~~
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.22.1)
 
 # NOTE: Parsing the version like this is suboptimal but neccessary due to our release process:
 # https://github.com/KhronosGroup/Vulkan-Headers/pull/346
@@ -52,9 +52,13 @@ if ((CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND (MSVC_VERSION GREATER_EQUAL "1941
     set(COMPILER_SUPPORTS_CXX_MODULES TRUE)
 endif()
 
-option(VULKAN_HEADERS_ENABLE_MODULE "Enables building of the Vulkan C++ module. Default is true if supported by the CMake version and compilers" ${COMPILER_SUPPORTS_CXX_MODULES})
+option(VULKAN_HEADERS_ENABLE_MODULE "Enables building of the Vulkan C++ module" OFF)
 
-if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.28" AND VULKAN_HEADERS_ENABLE_MODULE)
+if (VULKAN_HEADERS_ENABLE_MODULE AND (NOT COMPILER_SUPPORTS_CXX_MODULES OR CMAKE_VERSION VERSION_LESS "3.28"))
+    message(WARNING "Vulkan C++ module support is requested but was disabled due to lacking support on this platform")
+endif()
+
+if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.28" AND VULKAN_HEADERS_ENABLE_MODULE AND COMPILER_SUPPORTS_CXX_MODULES)
     add_library(Vulkan-Module)
     add_library(Vulkan::VulkanHppModule ALIAS Vulkan-Module)
     target_sources(Vulkan-Module
@@ -67,11 +71,6 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.28" AND VULKAN_HEADERS_ENABLE_MODULE)
     target_compile_features(Vulkan-Module PUBLIC cxx_std_20)
     target_link_libraries(Vulkan-Module PUBLIC Vulkan-Headers)
 endif ()
-
-if (CMAKE_VERSION VERSION_LESS "3.21")
-    # https://cmake.org/cmake/help/latest/variable/PROJECT_IS_TOP_LEVEL.html
-    string(COMPARE EQUAL ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR} PROJECT_IS_TOP_LEVEL)
-endif()
 
 option(VULKAN_HEADERS_ENABLE_TESTS "Test Vulkan-Headers" ${PROJECT_IS_TOP_LEVEL})
 option(VULKAN_HEADERS_ENABLE_INSTALL "Install Vulkan-Headers" ${PROJECT_IS_TOP_LEVEL})

@@ -1663,7 +1663,8 @@ TEST(TryLoadWrongBinaries, WrongArchLayer) {
     FillDebugUtilsCreateDetails(inst.create_info, log);
     inst.create_info.add_layer(layer_name);
     inst.CheckCreate(VK_ERROR_LAYER_NOT_PRESENT);
-    ASSERT_TRUE(log.find("Layer library architecture doesn't match the current running architecture, skipping this layer"));
+    ASSERT_TRUE(log.find(std::string("The library architecture in layer ") + env.get_shimmed_layer_manifest_path(0).string() +
+                         " doesn't match the current running architecture, skipping this layer"));
 }
 
 TEST(EnumeratePhysicalDeviceGroups, OneCall) {
@@ -3812,9 +3813,9 @@ TEST(AppPackageDiscovery, AppPackageDrivers) {
 }
 TEST(AppPackageDiscovery, AppPackageLayers) {
     FrameworkEnvironment env{};
-    env.add_icd(TestICDDetails(ManifestICD{}.set_lib_path(TEST_ICD_PATH_VERSION_2)));
+    env.add_icd(TestICDDetails(ManifestICD{}.set_lib_path(TEST_ICD_PATH_VERSION_2))).add_physical_device({});
 
-    const char* layer_name = "test_package_layer";
+    const char* layer_name = "VK_LAYER_test_package_layer";
     env.add_implicit_layer(TestLayerDetails(ManifestLayer{}.add_layer(ManifestLayer::LayerDescription{}
                                                                           .set_name(layer_name)
                                                                           .set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)
@@ -3825,14 +3826,30 @@ TEST(AppPackageDiscovery, AppPackageLayers) {
     InstWrapper inst{env.vulkan_functions};
     inst.CheckCreate();
 
-    {
-        VkLayerProperties layer_props{};
-        uint32_t layer_count = 0;
-        ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkEnumerateInstanceLayerProperties(&layer_count, NULL));
-        ASSERT_EQ(layer_count, 1);
-        ASSERT_EQ(VK_SUCCESS, env.vulkan_functions.vkEnumerateInstanceLayerProperties(&layer_count, &layer_props));
-        ASSERT_TRUE(string_eq(layer_name, layer_props.layerName));
-    }
+    auto layers = inst.GetActiveLayers(inst.GetPhysDev(), 1U);
+    ASSERT_EQ(layers.size(), 1);
+    ASSERT_TRUE(string_eq(layers.at(0).layerName, layer_name));
+}
+
+TEST(AppPackageDiscovery, AppPackageICDAndLayers) {
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails{TEST_ICD_PATH_VERSION_2}.set_discovery_type(ManifestDiscoveryType::windows_app_package))
+        .add_physical_device({});
+
+    const char* layer_name = "VK_LAYER_test_package_layer";
+    env.add_implicit_layer(TestLayerDetails(ManifestLayer{}.add_layer(ManifestLayer::LayerDescription{}
+                                                                          .set_name(layer_name)
+                                                                          .set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)
+                                                                          .set_disable_environment("DISABLE_ME")),
+                                            "test_package_layer.json")
+                               .set_discovery_type(ManifestDiscoveryType::windows_app_package));
+
+    InstWrapper inst{env.vulkan_functions};
+    inst.CheckCreate();
+
+    auto layers = inst.GetActiveLayers(inst.GetPhysDev(), 1U);
+    ASSERT_EQ(layers.size(), 1);
+    ASSERT_TRUE(string_eq(layers.at(0).layerName, layer_name));
 }
 
 // Make sure that stale layer manifests (path to nonexistant file) which have the same name as real manifests don't cause the real
@@ -3881,7 +3898,7 @@ TEST(DuplicateRegistryEntries, Drivers) {
 TEST(LibraryLoading, SystemLocations) {
     FrameworkEnvironment env{};
     EnvVarWrapper ld_library_path("LD_LIBRARY_PATH", env.get_folder(ManifestLocation::driver).location().string());
-    ld_library_path.add_to_list(narrow(env.get_folder(ManifestLocation::explicit_layer).location()));
+    ld_library_path.add_to_list(env.get_folder(ManifestLocation::explicit_layer).location());
 
     auto& driver = env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2).set_library_path_type(LibraryPathType::default_search_paths))
                        .add_physical_device({});
@@ -4483,6 +4500,28 @@ TEST(EnumerateAdapterPhysicalDevices, WrongErrorCodes) {
     // TestICD fails in EnumPhysDevs, should return VK_ERROR_INCOMPATIBLE_DRIVER
     env.get_test_icd().set_enum_physical_devices_return_code(VK_ERROR_SURFACE_LOST_KHR);
     check_icds();
+}
+
+TEST(EnumerateAdapterPhysicalDevices, ManyAdapters) {
+    FrameworkEnvironment env;
+
+    uint32_t icd_count = 10;
+    for (uint32_t i = 0; i < icd_count; i++) {
+        // Add 2 separate physical devices with the same luid
+        LUID luid{10U + i, static_cast<LONG>(100U + i)};
+        add_dxgi_adapter(env, std::string("physical_device_") + std::to_string(i), luid, 2);
+        add_dxgi_adapter(env, std::string("physical_device_") + std::to_string(i + icd_count), luid, 2);
+    }
+    uint32_t device_count = icd_count * 2;
+    InstWrapper inst{env.vulkan_functions};
+    inst.create_info.setup_WSI().set_api_version(VK_API_VERSION_1_1);
+    inst.CheckCreate();
+
+    auto physical_devices = inst.GetPhysDevs(device_count);
+    for (auto physical_device : physical_devices) {
+        DeviceWrapper dev{inst};
+        dev.CheckCreate(physical_device);
+    }
 }
 #endif  // defined(WIN32)
 
